@@ -1,0 +1,24 @@
+<details class="audit-date-filter" open>
+  <summary>{{ title }} (UTC)</summary>
+  <form method="get" aria-label="Rango de fechas">
+    {% for key, value in spec.preserved_params %}
+      <input type="hidden" name="{{ key }}" value="{{ value }}">
+    {% endfor %}
+    {{ spec.form.non_field_errors }}
+    {% for field in spec.form %}
+      <div class="audit-date-field">
+        {{ field.label_tag }}
+        {{ field }}
+        {{ field.errors }}
+      </div>
+    {% endfor %}
+    <div class="audit-date-actions">
+      <button type="submit">Aplicar fechas</button>
+      {% if spec.form.is_bound %}
+        {% for choice in choices %}
+          <a href="{{ choice.clear_url|iriencode }}">Limpiar fechas</a>
+        {% endfor %}
+      {% endif %}
+    </div>
+  </form>
+</details>

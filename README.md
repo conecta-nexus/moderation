@@ -50,3 +50,97 @@ uv run python manage.py test
 uv run coverage run --source=apps.moderation --omit="*/tests/*" manage.py test
 uv run coverage report -m
 ```
+
+## Audit consultation
+
+The Moderation service exposes its Django Admin for read-only audit consultation.
+A user must have a native Django session and be active staff with the
+`moderation.view_auditlog` permission. A Django superuser can consult audit
+records. The `AuditLog` admin disallows writes for every account. Platform
+JWT roles belong to the future REST API and are separate from Django session
+credentials.
+
+The changelist provides action and target-type filters, UTC date bounds, and
+search by email, justification, or complete target UUID. The start date includes
+its midnight. The end date includes the selected calendar day and excludes the
+following midnight. Either date is optional. Invalid or reversed ranges display
+form errors and return an empty list.
+
+### Deployment modes
+
+`FORCE_SCRIPT_NAME` is a process-wide Django setting, so standalone and
+Gateway-mounted URL layouts require separate deployment configurations and are
+not served simultaneously by the same process.
+
+1. **Mode A — Standalone service (`/admin/`)**:
+   - Leave `FORCE_SCRIPT_NAME` unset or empty (or `/` which normalizes to
+     unmounted `None`).
+   - Leave `CSRF_TRUSTED_ORIGINS` empty for same-origin direct access.
+   - Set `ALLOWED_HOSTS` to the direct service hostnames (for example
+     `localhost,127.0.0.1`).
+   - Django Admin is served at `/admin/` and static assets at `/static/`.
+
+2. **Mode B — Gateway-mounted service (`/services/moderation/admin/`)**:
+   - Set `FORCE_SCRIPT_NAME=/services/moderation` (must start with a single `/`,
+     without scheme, host, query, fragment, whitespace, dot segments, or `//`;
+     a single trailing slash such as `/services/moderation/` is normalized to
+     `/services/moderation`).
+   - Set `ALLOWED_HOSTS` to the hostnames forwarded by the proxy (for example
+     `localhost,127.0.0.1,moderation,gateway` in local Compose, or the Cloud Run
+     service/proxy hostname in production; never `*` in production).
+   - Set `CSRF_TRUSTED_ORIGINS` explicitly to the external browser origin(s)
+     served by the Gateway:
+     - Local HTTP Gateway: `CSRF_TRUSTED_ORIGINS=http://localhost:8080` (do not
+       use this development origin in production).
+     - Production HTTPS Gateway: `CSRF_TRUSTED_ORIGINS=https://<gateway-host>`.
+
+### Security, cookies, static resources, and proxy assumptions
+
+- **Secrets and HTTPS**: Set a deployment-specific `SECRET_KEY`, `ALLOWED_HOSTS`,
+  and `DEBUG`. `DEBUG` defaults to `False`, which enforces `SESSION_COOKIE_SECURE=True`
+  and `CSRF_COOKIE_SECURE=True` (HTTPS required). Local HTTP development uses
+  `DEBUG=True` only in an ignored local `.env`.
+- **Cookies**: Session and CSRF cookies use isolated names
+  (`moderation_sessionid` and `moderation_csrftoken`), `HttpOnly=True` for the
+  session cookie, and `SameSite=Lax`. When `FORCE_SCRIPT_NAME` is set, both
+  cookie paths are scoped to `<FORCE_SCRIPT_NAME>/` (for example
+  `/services/moderation/`); otherwise they default to `/`.
+- **Reverse-proxy assumptions and trust boundary**:
+  - The local Nginx Gateway (`location /services/moderation/`) strips
+    `/services/moderation/` before proxying to Moderation and forwards
+    `Host $host` without `:8080`, `X-Forwarded-Host $host`, and
+    `X-Forwarded-Port $server_port` (`80`). Because `Origin: http://localhost:8080`
+    includes the external port while `Host` does not, Django requires explicit
+    `CSRF_TRUSTED_ORIGINS=http://localhost:8080`.
+  - The Cloud Run Nginx template sets `Host $proxy_host` and overwrites
+    `X-Forwarded-Proto $scheme` (which is `http` inside the Cloud Run Gateway
+    container after Google Front End TLS termination).
+  - Accordingly, `USE_X_FORWARDED_HOST`, `USE_X_FORWARDED_PORT`, and
+    `SECURE_PROXY_SSL_HEADER` remain disabled (`False`/`None`) so Moderation
+    never trusts arbitrary forwarded headers. Origin validation uses explicit
+    `CSRF_TRUSTED_ORIGINS` alongside Django's CSRF middleware and token checks.
+- **Static resource delivery**:
+  - `STATIC_URL = "static/"` is relative, so Django automatically resolves it
+    to `/static/` in standalone mode and `/services/moderation/static/` when
+    `FORCE_SCRIPT_NAME=/services/moderation` is active.
+  - In `DEBUG=True` with `runserver`, Django's `StaticFilesHandler` inspects the
+    stripped `PATH_INFO` (`/static/...`) against `settings.STATIC_URL`
+    (`/services/moderation/static/`), so `config/urls.py` registers
+    `staticfiles_urlpatterns("/static/")` only while `DEBUG=True`.
+  - In production (`DEBUG=False`), `staticfiles_urlpatterns` is disabled and
+    `DEBUG` must not be enabled to serve assets. Run
+    `uv run python manage.py collectstatic --noinput` to populate `STATIC_ROOT`
+    (`staticfiles/`) and serve those files at `<FORCE_SCRIPT_NAME>/static/`
+    from the reverse proxy, CDN, or object storage.
+- **Health and future REST API (`MODERATION-TASK-04`) routing**:
+  - `GET /` and `GET /health/` remain available at both direct paths and
+    `/services/moderation/` / `/services/moderation/health/` via Nginx prefix
+    stripping.
+  - Gateway's `/api/v1/moderation(s)?` routes proxy *without* stripping the
+    path prefix. Under a process-wide `FORCE_SCRIPT_NAME=/services/moderation`,
+    Django still matches `PATH_INFO` (`/api/v1/moderation/...`), **but**
+    `request.path`, `reverse()`, and `request.build_absolute_uri()` (used by
+    DRF pagination `next`/`previous` links) prepend `FORCE_SCRIPT_NAME` and use
+    `request.get_host()`. Future `MODERATION-TASK-04` pagination should avoid
+    `build_absolute_uri()` under a mounted prefix (for example, emit relative or
+    page-metadata links, or deploy Admin and API on separate processes/origins).

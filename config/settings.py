@@ -11,9 +11,72 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import environ
 from django.core.exceptions import ImproperlyConfigured
+
+
+def parse_force_script_name(value: str | None) -> str | None:
+    """Validate and normalize an optional deployment mount prefix."""
+    if value is None:
+        return None
+    raw = value.strip()
+    if not raw or raw == "/":
+        return None
+    if any(ch.isspace() or ord(ch) < 32 for ch in raw):
+        raise ImproperlyConfigured(
+            "FORCE_SCRIPT_NAME must not contain whitespace or control characters."
+        )
+    if not raw.startswith("/") or raw.startswith("//") or "//" in raw:
+        raise ImproperlyConfigured(
+            "FORCE_SCRIPT_NAME must start with a single '/' and omit empty segments."
+        )
+    if "?" in raw or "#" in raw:
+        raise ImproperlyConfigured(
+            "FORCE_SCRIPT_NAME must not include a query string or fragment."
+        )
+    parsed = urlsplit(raw)
+    if parsed.scheme or parsed.netloc or parsed.path != raw:
+        raise ImproperlyConfigured(
+            "FORCE_SCRIPT_NAME must be a path prefix without scheme or host."
+        )
+    normalized = raw.rstrip("/")
+    segments = normalized.lstrip("/").split("/")
+    if any(segment in {"", ".", ".."} for segment in segments):
+        raise ImproperlyConfigured(
+            "FORCE_SCRIPT_NAME must not contain empty or dot path segments."
+        )
+    return normalized
+
+
+def parse_csrf_trusted_origins(origins: list[str]) -> list[str]:
+    """Validate explicit scheme-and-host origins for CSRF verification."""
+    validated: list[str] = []
+    for item in origins:
+        origin = item.strip()
+        if not origin:
+            continue
+        parsed = urlsplit(origin)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ImproperlyConfigured(
+                f"Invalid CSRF_TRUSTED_ORIGINS entry {origin!r}: expected http(s)://host[:port]."
+            )
+        if (
+            parsed.username is not None
+            or parsed.password is not None
+            or parsed.path
+            or parsed.query
+            or parsed.fragment
+            or "*" in parsed.netloc
+        ):
+            raise ImproperlyConfigured(
+                f"Invalid CSRF_TRUSTED_ORIGINS entry {origin!r}: wildcards, credentials, paths, queries, and fragments are not allowed."
+            )
+        if origin not in validated:
+            validated.append(origin)
+    return validated
+
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -24,13 +87,23 @@ env.read_env(BASE_DIR / ".env")
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-6_c^cl8nz$c(y^8f2&!dv0qwcqxxkvd96ap@*gq%1u-*jilz2i'
+SECRET_KEY = env("SECRET_KEY")
+DEBUG = env.bool("DEBUG", default=False)
+ALLOWED_HOSTS = env.list("ALLOWED_HOSTS", default=["localhost", "127.0.0.1", "[::1]"])
+FORCE_SCRIPT_NAME = parse_force_script_name(env("FORCE_SCRIPT_NAME", default=""))
+CSRF_TRUSTED_ORIGINS = parse_csrf_trusted_origins(
+    env.list("CSRF_TRUSTED_ORIGINS", default=[])
+)
 
-# SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
-
-ALLOWED_HOSTS = ["*"]
+SESSION_COOKIE_NAME = "moderation_sessionid"
+CSRF_COOKIE_NAME = "moderation_csrftoken"
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SAMESITE = "Lax"
+SESSION_COOKIE_PATH = f"{FORCE_SCRIPT_NAME}/" if FORCE_SCRIPT_NAME else "/"
+CSRF_COOKIE_PATH = f"{FORCE_SCRIPT_NAME}/" if FORCE_SCRIPT_NAME else "/"
+SESSION_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SECURE = not DEBUG
 
 
 # Application definition
@@ -62,7 +135,7 @@ ROOT_URLCONF = 'config.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [],
+        'DIRS': [BASE_DIR / "templates"],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -120,6 +193,7 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / "staticfiles"
 
 
 # Email
