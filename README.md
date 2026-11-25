@@ -82,24 +82,31 @@ not served simultaneously by the same process.
 
 2. **Mode B — Gateway-mounted service (`/services/moderation/admin/`)**:
    - Set `FORCE_SCRIPT_NAME=/services/moderation` (must start with a single `/`,
-     without scheme, host, query, fragment, whitespace, dot segments, or `//`;
-     a single trailing slash such as `/services/moderation/` is normalized to
+     without backslashes, percent-encoded characters, scheme, host, query,
+     fragment, whitespace, control characters, dot segments, or `//`; a single
+     trailing slash such as `/services/moderation/` is normalized to
      `/services/moderation`).
    - Set `ALLOWED_HOSTS` to the hostnames forwarded by the proxy (for example
      `localhost,127.0.0.1,moderation,gateway` in local Compose, or the Cloud Run
      service/proxy hostname in production; never `*` in production).
-   - Set `CSRF_TRUSTED_ORIGINS` explicitly to the external browser origin(s)
-     served by the Gateway:
+   - Set `CSRF_TRUSTED_ORIGINS` explicitly to valid `http://` or `https://`
+     scheme-and-host origins (DNS hostnames, IPv4, or bracketed IPv6, with
+     optional numeric port `1..65535`; wildcards, credentials, paths, queries,
+     fragments, whitespace, control characters, and backslashes are rejected):
      - Local HTTP Gateway: `CSRF_TRUSTED_ORIGINS=http://localhost:8080` (do not
        use this development origin in production).
      - Production HTTPS Gateway: `CSRF_TRUSTED_ORIGINS=https://<gateway-host>`.
 
 ### Security, cookies, static resources, and proxy assumptions
 
-- **Secrets and HTTPS**: Set a deployment-specific `SECRET_KEY`, `ALLOWED_HOSTS`,
-  and `DEBUG`. `DEBUG` defaults to `False`, which enforces `SESSION_COOKIE_SECURE=True`
-  and `CSRF_COOKIE_SECURE=True` (HTTPS required). Local HTTP development uses
-  `DEBUG=True` only in an ignored local `.env`.
+- **Secrets, container image defaults, and HTTPS**: The Docker image does not
+  override `DEBUG` or `ALLOWED_HOSTS`, so without explicit deployment
+  environment variables Django defaults to `DEBUG=False`, restricted
+  `ALLOWED_HOSTS` (`localhost,127.0.0.1,[::1]`), `SESSION_COOKIE_SECURE=True`,
+  and `CSRF_COOKIE_SECURE=True` (HTTPS required). `SECRET_KEY` and
+  `DATABASE_URL` are supplied by the deployment environment. Local HTTP development explicitly enables
+  `DEBUG=True` and sets `ALLOWED_HOSTS` / `CSRF_TRUSTED_ORIGINS` only via the
+  ignored local `.env` or Compose overrides.
 - **Cookies**: Session and CSRF cookies use isolated names
   (`moderation_sessionid` and `moderation_csrftoken`), `HttpOnly=True` for the
   session cookie, and `SameSite=Lax`. When `FORCE_SCRIPT_NAME` is set, both
@@ -120,9 +127,10 @@ not served simultaneously by the same process.
     never trusts arbitrary forwarded headers. Origin validation uses explicit
     `CSRF_TRUSTED_ORIGINS` alongside Django's CSRF middleware and token checks.
 - **Static resource delivery**:
-  - `STATIC_URL = "static/"` is relative, so Django automatically resolves it
-    to `/static/` in standalone mode and `/services/moderation/static/` when
-    `FORCE_SCRIPT_NAME=/services/moderation` is active.
+  - `STATIC_URL` is calculated from the validated `FORCE_SCRIPT_NAME`. It is
+    `/static/` in standalone mode and `/services/moderation/static/` in Gateway
+    mode, including when Django initializes before any request sets the
+    context-local script prefix.
   - In `DEBUG=True` with `runserver`, Django's `StaticFilesHandler` inspects the
     stripped `PATH_INFO` (`/static/...`) against `settings.STATIC_URL`
     (`/services/moderation/static/`), so `config/urls.py` registers

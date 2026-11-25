@@ -10,23 +10,35 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import ipaddress
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import environ
 from django.core.exceptions import ImproperlyConfigured
 
+_HOSTNAME_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+
 
 def parse_force_script_name(value: str | None) -> str | None:
     """Validate and normalize an optional deployment mount prefix."""
     if value is None:
         return None
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise ImproperlyConfigured(
+            "FORCE_SCRIPT_NAME must not contain control characters."
+        )
     raw = value.strip()
     if not raw or raw == "/":
         return None
-    if any(ch.isspace() or ord(ch) < 32 for ch in raw):
+    if any(ch.isspace() for ch in raw):
+        raise ImproperlyConfigured("FORCE_SCRIPT_NAME must not contain whitespace.")
+    if "\\" in raw:
+        raise ImproperlyConfigured("FORCE_SCRIPT_NAME must not contain backslashes.")
+    if "%" in raw:
         raise ImproperlyConfigured(
-            "FORCE_SCRIPT_NAME must not contain whitespace or control characters."
+            "FORCE_SCRIPT_NAME must not contain percent-encoded characters."
         )
     if not raw.startswith("/") or raw.startswith("//") or "//" in raw:
         raise ImproperlyConfigured(
@@ -36,7 +48,12 @@ def parse_force_script_name(value: str | None) -> str | None:
         raise ImproperlyConfigured(
             "FORCE_SCRIPT_NAME must not include a query string or fragment."
         )
-    parsed = urlsplit(raw)
+    try:
+        parsed = urlsplit(raw)
+    except ValueError as exc:
+        raise ImproperlyConfigured(
+            f"FORCE_SCRIPT_NAME is not a valid path prefix: {exc}."
+        ) from exc
     if parsed.scheme or parsed.netloc or parsed.path != raw:
         raise ImproperlyConfigured(
             "FORCE_SCRIPT_NAME must be a path prefix without scheme or host."
@@ -50,14 +67,91 @@ def parse_force_script_name(value: str | None) -> str | None:
     return normalized
 
 
+def _validate_origin_netloc(netloc: str, origin: str) -> None:
+    """Validate an origin's host (DNS, IPv4, or bracketed IPv6) and optional port."""
+    if netloc.startswith("["):
+        if "]" not in netloc:
+            raise ImproperlyConfigured(
+                f"Invalid CSRF_TRUSTED_ORIGINS entry {origin!r}: malformed IPv6 host."
+            )
+        host_part, rest = netloc[1:].split("]", 1)
+        try:
+            ipaddress.IPv6Address(host_part)
+        except ValueError as exc:
+            raise ImproperlyConfigured(
+                f"Invalid CSRF_TRUSTED_ORIGINS entry {origin!r}: invalid IPv6 host."
+            ) from exc
+        if rest:
+            if not rest.startswith(":"):
+                raise ImproperlyConfigured(
+                    f"Invalid CSRF_TRUSTED_ORIGINS entry {origin!r}: invalid host suffix."
+                )
+            _validate_origin_port(rest[1:], origin)
+        return
+
+    if "[" in netloc or "]" in netloc or netloc.count(":") > 1:
+        raise ImproperlyConfigured(
+            f"Invalid CSRF_TRUSTED_ORIGINS entry {origin!r}: invalid host syntax."
+        )
+    if ":" in netloc:
+        host_part, port_part = netloc.split(":", 1)
+        _validate_origin_port(port_part, origin)
+    else:
+        host_part = netloc
+
+    if not host_part or len(host_part) > 253:
+        raise ImproperlyConfigured(
+            f"Invalid CSRF_TRUSTED_ORIGINS entry {origin!r}: invalid host syntax."
+        )
+    try:
+        ipaddress.IPv4Address(host_part)
+    except ValueError:
+        labels = host_part.split(".")
+        if any(not _HOSTNAME_LABEL_RE.match(label) for label in labels):
+            raise ImproperlyConfigured(
+                f"Invalid CSRF_TRUSTED_ORIGINS entry {origin!r}: invalid host syntax."
+            )
+        if labels[-1].isdigit():
+            raise ImproperlyConfigured(
+                f"Invalid CSRF_TRUSTED_ORIGINS entry {origin!r}: invalid host syntax."
+            )
+
+
+def _validate_origin_port(port_part: str, origin: str) -> None:
+    """Validate that an origin port is numeric and within 1..65535."""
+    if not port_part or not port_part.isascii() or not port_part.isdigit():
+        raise ImproperlyConfigured(
+            f"Invalid CSRF_TRUSTED_ORIGINS entry {origin!r}: invalid port."
+        )
+    port = int(port_part)
+    if not 1 <= port <= 65535:
+        raise ImproperlyConfigured(
+            f"Invalid CSRF_TRUSTED_ORIGINS entry {origin!r}: port out of range 1-65535."
+        )
+
+
 def parse_csrf_trusted_origins(origins: list[str]) -> list[str]:
     """Validate explicit scheme-and-host origins for CSRF verification."""
     validated: list[str] = []
     for item in origins:
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in item):
+            raise ImproperlyConfigured(
+                f"Invalid CSRF_TRUSTED_ORIGINS entry {item!r}: control characters are not allowed."
+            )
         origin = item.strip()
         if not origin:
             continue
-        parsed = urlsplit(origin)
+        if any(ch.isspace() for ch in origin) or "\\" in origin:
+            raise ImproperlyConfigured(
+                f"Invalid CSRF_TRUSTED_ORIGINS entry {origin!r}: whitespace and backslashes are not allowed."
+            )
+        try:
+            parsed = urlsplit(origin)
+            _ = parsed.port
+        except ValueError as exc:
+            raise ImproperlyConfigured(
+                f"Invalid CSRF_TRUSTED_ORIGINS entry {origin!r}: {exc}."
+            ) from exc
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
             raise ImproperlyConfigured(
                 f"Invalid CSRF_TRUSTED_ORIGINS entry {origin!r}: expected http(s)://host[:port]."
@@ -66,13 +160,15 @@ def parse_csrf_trusted_origins(origins: list[str]) -> list[str]:
             parsed.username is not None
             or parsed.password is not None
             or parsed.path
-            or parsed.query
-            or parsed.fragment
+            or "?" in origin
+            or "#" in origin
             or "*" in parsed.netloc
+            or "%" in parsed.netloc
         ):
             raise ImproperlyConfigured(
                 f"Invalid CSRF_TRUSTED_ORIGINS entry {origin!r}: wildcards, credentials, paths, queries, and fragments are not allowed."
             )
+        _validate_origin_netloc(parsed.netloc, origin)
         if origin not in validated:
             validated.append(origin)
     return validated
@@ -192,7 +288,9 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
-STATIC_URL = 'static/'
+# The development static handler can initialize before any request sets Django's
+# context-local script prefix. Resolve the URL from deployment settings instead.
+STATIC_URL = f"{FORCE_SCRIPT_NAME or ''}/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
 
 

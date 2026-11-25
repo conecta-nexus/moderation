@@ -6,7 +6,6 @@ import sys
 import uuid
 from datetime import UTC, datetime
 from secrets import token_urlsafe
-from unittest.mock import patch
 
 from django.conf import settings
 from django.contrib import admin
@@ -388,9 +387,24 @@ class GatewayMountConfigurationTests(TestCase):
         self.assertEqual(parse_csrf_trusted_origins(["", "   "]), [])
         self.assertEqual(
             parse_csrf_trusted_origins(
-                ["http://localhost:8080", "http://localhost:8080", "https://gw.test"]
+                [
+                    "http://localhost:8080",
+                    "http://localhost:8080",
+                    "https://gw.test",
+                    "https://gateway.example.edu.co:8443",
+                    "http://127.0.0.1:8080",
+                    "http://[::1]:8080",
+                    "https://[2001:db8::1]",
+                ]
             ),
-            ["http://localhost:8080", "https://gw.test"],
+            [
+                "http://localhost:8080",
+                "https://gw.test",
+                "https://gateway.example.edu.co:8443",
+                "http://127.0.0.1:8080",
+                "http://[::1]:8080",
+                "https://[2001:db8::1]",
+            ],
         )
         with (
             override_settings(
@@ -410,12 +424,14 @@ class GatewayMountConfigurationTests(TestCase):
             self.assertEqual(reverse("admin:index"), "/admin/")
 
         clean_env = os.environ.copy()
-        clean_env.pop("FORCE_SCRIPT_NAME", None)
-        clean_env.pop("CSRF_TRUSTED_ORIGINS", None)
-        clean_env.pop("DEBUG", None)
+        for key in (
+            "FORCE_SCRIPT_NAME",
+            "CSRF_TRUSTED_ORIGINS",
+            "DEBUG",
+            "ALLOWED_HOSTS",
+        ):
+            clean_env.pop(key, None)
         clean_env["SECRET_KEY"] = "test-only-ephemeral-secret"
-        with patch("environ.Env.read_env"):
-            pass
         probe = subprocess.run(
             [
                 sys.executable,
@@ -423,7 +439,8 @@ class GatewayMountConfigurationTests(TestCase):
                 (
                     "import environ; environ.Env.read_env = lambda *a, **kw: None; "
                     "import django; django.setup(); from django.conf import settings; "
-                    "print(settings.FORCE_SCRIPT_NAME, settings.CSRF_TRUSTED_ORIGINS, "
+                    "print(settings.DEBUG, settings.ALLOWED_HOSTS, "
+                    "settings.FORCE_SCRIPT_NAME, settings.CSRF_TRUSTED_ORIGINS, "
                     "settings.STATIC_URL, settings.SESSION_COOKIE_SECURE, "
                     "settings.CSRF_COOKIE_SECURE, settings.SESSION_COOKIE_PATH)"
                 ),
@@ -435,14 +452,39 @@ class GatewayMountConfigurationTests(TestCase):
         )
         self.assertEqual(
             probe.stdout.strip(),
-            "None [] /static/ True True /",
+            "False ['localhost', '127.0.0.1', '[::1]'] None [] /static/ True True /",
         )
+
+        missing_secret_env = clean_env.copy()
+        missing_secret_env.pop("SECRET_KEY", None)
+        missing_secret = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import environ; environ.Env.read_env = lambda *a, **kw: None; "
+                    "import django; django.setup()"
+                ),
+            ],
+            env={**missing_secret_env, "DJANGO_SETTINGS_MODULE": "config.settings"},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertNotEqual(missing_secret.returncode, 0)
+        self.assertIn("ImproperlyConfigured", missing_secret.stderr)
 
     def test_invalid_prefix_and_origin_configurations_raise_improperly_configured(self):
         for bad_prefix in (
             "services/moderation",
             "//evil.example/moderation",
             "/services//moderation",
+            r"/a\b",
+            r"\services",
+            "/a/%2e%2e/b",
+            "/a/%2f/b",
+            r"/a/%5c/b",
+            "/services%20moderation",
             "https://example.com/services/moderation",
             "/services/moderation?next=1",
             "/services/moderation#fragment",
@@ -450,6 +492,8 @@ class GatewayMountConfigurationTests(TestCase):
             "/services/./admin",
             "/services/ moderation",
             "/services/\nmoderation",
+            "\n/services/moderation",
+            "/services/\x7fmoderation",
         ):
             with (
                 self.subTest(prefix=bad_prefix),
@@ -463,9 +507,38 @@ class GatewayMountConfigurationTests(TestCase):
             "https://*.example.com",
             "localhost:8080",
             "ftp://localhost:8080",
+            "http://",
+            "http://localhost:99999",
+            "http://localhost:abc",
+            "http://localhost:0",
+            "http://localhost:",
+            "http://localhost:80_80",
+            "http://localhost:+80",
+            "http://localhost:8080:9090",
+            "http://[::1",
+            "http://[not-ipv6]",
+            "http://[::1]extra",
+            "http://[::1]:99999",
+            "http://[::1]:abc",
+            "http://[::1]:",
+            "http://[::1%eth0]:8080",
+            "http://999.999.999.999",
+            "http://12345",
+            "http://-bad.example",
+            "http://bad-.example",
+            "http://bad..example",
+            "http://bad_host.example",
+            "http://local host:8080",
+            "http://localhost:8080\n",
+            "http://localhost\t:8080",
+            "http://localhost:8080\x7f",
+            r"http://bad\host",
+            "http://localhost:8080/",
             "http://localhost:8080/services/moderation",
             "http://localhost:8080?x=1",
             "http://localhost:8080#top",
+            "http://localhost?",
+            "http://localhost#",
             "http://user:pass@localhost:8080",
         ):
             with (
@@ -473,6 +546,32 @@ class GatewayMountConfigurationTests(TestCase):
                 self.assertRaises(ImproperlyConfigured),
             ):
                 parse_csrf_trusted_origins([bad_origin])
+
+    def test_static_url_is_prefixed_before_wsgi_sets_the_request_script_prefix(self):
+        probe = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from django.core.wsgi import get_wsgi_application; "
+                    "from django.contrib.staticfiles.handlers import StaticFilesHandler; "
+                    "from django.urls import set_script_prefix; "
+                    "set_script_prefix('/'); "
+                    "handler = StaticFilesHandler(get_wsgi_application()); "
+                    "print(handler.base_url.path, handler._should_handle('/static/admin/js/theme.js'))"
+                ),
+            ],
+            env={
+                **os.environ,
+                "DEBUG": "True",
+                "DJANGO_SETTINGS_MODULE": "config.settings",
+                "FORCE_SCRIPT_NAME": "/services/moderation",
+            },
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        self.assertEqual(probe.stdout.strip(), "/services/moderation/static/ False")
 
     @override_settings(
         FORCE_SCRIPT_NAME="/services/moderation",
