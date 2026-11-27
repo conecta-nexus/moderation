@@ -14,10 +14,24 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
+
+from django.conf import settings
 from django.contrib import admin
+from django.contrib.staticfiles.urls import staticfiles_urlpatterns
 from django.urls import include, path
+
+admin.site.site_header = "Conecta Nexus · Administración"
+admin.site.site_title = "Conecta Nexus"
+admin.site.index_title = "Administración institucional"
+admin.site.site_url = None
 
 urlpatterns = [
     path("", include("apps.core.urls")),
     path("admin/", admin.site.urls),
 ]
+
+# When FORCE_SCRIPT_NAME is set and a reverse proxy strips the mount prefix,
+# StaticFilesHandler ignores stripped /static/ requests because its base_url
+# includes the prefix. Register the stripped static route in DEBUG mode only.
+if settings.DEBUG:
+    urlpatterns += staticfiles_urlpatterns("/static/")

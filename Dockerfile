@@ -3,16 +3,13 @@ FROM python:3.12-slim
 # Install uv from official image
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# Environment settings
+# Environment settings (safe application defaults govern DEBUG and ALLOWED_HOSTS)
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT="/venv" \
-    PATH="/venv/bin:$PATH" \
-    DATABASE_URL="postgresql://postgres:postgrespassword@postgres:5432/db_moderation" \
-    DEBUG="True" \
-    ALLOWED_HOSTS="*"
+    PATH="/venv/bin:$PATH"
 
 WORKDIR /app
 

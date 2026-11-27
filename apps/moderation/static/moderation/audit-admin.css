@@ -1,0 +1,74 @@
+:root {
+  --audit-brand: #bc0017;
+  --audit-focus: #bc0017;
+}
+
+html[data-theme="dark"] {
+  --audit-focus: #ff8998;
+}
+
+@media (prefers-color-scheme: dark) {
+  html:not([data-theme="light"]) {
+    --audit-focus: #ff8998;
+  }
+}
+
+#header {
+  border-block-start: 4px solid var(--audit-brand);
+}
+
+#header #site-name a {
+  color: var(--header-link-color);
+  font-weight: 700;
+}
+
+:is(a, button, input, summary):focus-visible {
+  outline: 2px solid var(--audit-focus);
+  outline-offset: 3px;
+}
+
+#header :is(a, button):focus-visible {
+  outline-color: var(--header-link-color);
+}
+
+#changelist-filter .audit-date-filter form {
+  padding: 4px 15px 14px;
+}
+
+.audit-date-field {
+  display: grid;
+  gap: 4px;
+  margin-block-end: 10px;
+}
+
+.audit-date-field input {
+  box-sizing: border-box;
+  max-inline-size: 100%;
+  min-block-size: 36px;
+}
+
+.audit-date-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.audit-date-actions button {
+  padding: 6px 9px;
+  color: var(--body-fg);
+  background: var(--body-bg);
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.app-moderation.model-auditlog .readonly,
+.app-moderation.model-auditlog #result_list :is(.field-actor_email, .field-target_id) {
+  overflow-wrap: anywhere;
+}
+
+.app-moderation.model-auditlog .field-justification .readonly {
+  max-inline-size: 80ch;
+  white-space: pre-wrap;
+}
