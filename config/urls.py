@@ -28,6 +28,7 @@ admin.site.site_url = None
 urlpatterns = [
     path("", include("apps.core.urls")),
     path("admin/", admin.site.urls),
+    path("api/v1/moderation/", include("apps.moderation.urls")),
 ]
 
 # When FORCE_SCRIPT_NAME is set and a reverse proxy strips the mount prefix,

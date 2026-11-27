@@ -47,6 +47,8 @@ and will refuse reversal if audit rows exist.
 
 ```sh
 uv run python manage.py test
+uv run pytest -k 'test_audit_log_list'
+uv run pytest
 uv run coverage run --source=apps.moderation --omit="*/tests/*" manage.py test
 uv run coverage report -m
 ```
@@ -56,9 +58,8 @@ uv run coverage report -m
 The Moderation service exposes its Django Admin for read-only audit consultation.
 A user must have a native Django session and be active staff with the
 `moderation.view_auditlog` permission. A Django superuser can consult audit
-records. The `AuditLog` admin disallows writes for every account. Platform
-JWT roles belong to the future REST API and are separate from Django session
-credentials.
+records. The `AuditLog` admin disallows writes for every account. Django Admin
+session credentials are separate from the REST API's platform JWTs.
 
 The changelist provides action and target-type filters, UTC date bounds, and
 search by email, justification, or complete target UUID. The start date includes
@@ -140,15 +141,226 @@ not served simultaneously by the same process.
     `uv run python manage.py collectstatic --noinput` to populate `STATIC_ROOT`
     (`staticfiles/`) and serve those files at `<FORCE_SCRIPT_NAME>/static/`
     from the reverse proxy, CDN, or object storage.
-- **Health and future REST API (`MODERATION-TASK-04`) routing**:
+- **Health and REST API routing**:
   - `GET /` and `GET /health/` remain available at both direct paths and
     `/services/moderation/` / `/services/moderation/health/` via Nginx prefix
     stripping.
   - Gateway's `/api/v1/moderation(s)?` routes proxy *without* stripping the
     path prefix. Under a process-wide `FORCE_SCRIPT_NAME=/services/moderation`,
     Django still matches `PATH_INFO` (`/api/v1/moderation/...`), **but**
-    `request.path`, `reverse()`, and `request.build_absolute_uri()` (used by
-    DRF pagination `next`/`previous` links) prepend `FORCE_SCRIPT_NAME` and use
-    `request.get_host()`. Future `MODERATION-TASK-04` pagination should avoid
-    `build_absolute_uri()` under a mounted prefix (for example, emit relative or
-    page-metadata links, or deploy Admin and API on separate processes/origins).
+    `request.path` and `reverse()` prepend `FORCE_SCRIPT_NAME`. API pagination
+    builds root-relative links from `PATH_INFO` so the login and static mount
+    settings do not affect the REST API route.
+
+## Audit log REST API
+
+`GET /api/v1/moderation/audit-logs/` requires an Auth-issued RS256 access token
+with role `ADMIN` and scope `audit:read`. Send it as `Authorization: Bearer <token>`.
+Moderation checks the signature and claims even behind Gateway. A missing or
+invalid token returns 401 with a Bearer challenge. A valid token without the
+required role or scope returns 403. The service also supports HEAD and OPTIONS.
+
+| Query parameter | Contract |
+| --- | --- |
+| `page` | Positive integer, default 1. A positive page beyond the result set returns 404. |
+| `page_size` | Integer from 1 to 100, default 20. Larger values return 400. |
+| `action_type` | `CHALLENGE_SUSPEND`, `USER_SUSPEND`, or `CONTENT_FLAG`. |
+| `actor_id` | Exact UUID match. |
+| `start_date` | UTC calendar date in `YYYY-MM-DD`. Starts at inclusive midnight. |
+| `end_date` | UTC calendar date in `YYYY-MM-DD`. Includes the whole day by excluding the next midnight. The maximum end date is `9999-12-30`. |
+
+Date bounds can be used independently. Filters combine with AND. Known invalid
+parameters, including a reversed date range, return 400 with errors keyed by
+field. Unknown parameters are ignored. Repeating a supported parameter returns
+400 for that parameter.
+
+The JSON response contains `count`, `next`, `previous`, and `results`. Results
+are ordered by descending timestamp and descending UUID for equal timestamps.
+Navigation links are root-relative and retain the submitted query. Resolve
+them against the public API origin before passing them to a client that
+automatically prepends `/api/v1`. An empty first page returns 200 with
+`{"count":0,"next":null,"previous":null,"results":[]}`.
+
+Each result returns `id`, `actor_id`, `actor_email`, `actor_role`, `action_type`,
+`target_id`, `target_type`, `justification`, `ip_address`, and `created_at`.
+The timestamp uses ISO 8601 UTC and the enum values and justification retain
+their stored content.
+
+### Local Auth public key with Docker Compose
+
+Run these PowerShell commands from the Conecta Nexus workspace root with the
+local Compose stack running. Auth's existing `auth/certs/jwt_public.pem` must
+be the public key provisioned for this environment. The root `compose.yaml`
+mounts the Moderation source at `/app` and reads `moderation/.env`. Add the key
+as a separate read-only mount in an ignored overlay.
+
+```powershell
+$keyOverlay = '.env.local/moderation-audit-key.compose.yaml'
+if (-not (Test-Path -LiteralPath 'auth/certs/jwt_public.pem' -PathType Leaf)) {
+    throw 'Provision the public PEM from the trusted local Auth deployment first.'
+}
+New-Item -ItemType Directory -Force '.env.local' | Out-Null
+git check-ignore -q -- $keyOverlay
+if ($LASTEXITCODE -ne 0) { throw 'The local Compose overlay must be ignored.' }
+if (Test-Path -LiteralPath $keyOverlay) {
+    throw 'Inspect the existing overlay before reusing or editing it.'
+}
+@'
+services:
+  moderation:
+    environment:
+      JWT_PUBLIC_KEY: ""
+      JWT_PUBLIC_KEY_PATH: /run/conecta-keys/jwt_public.pem
+    volumes:
+      - type: bind
+        source: ./auth/certs/jwt_public.pem
+        target: /run/conecta-keys/jwt_public.pem
+        read_only: true
+        bind:
+          create_host_path: false
+'@ | Set-Content -LiteralPath $keyOverlay -Encoding ascii
+```
+
+Use the same project name and ordered Compose files already used to launch the
+stack, and append the new overlay last. The example below uses the default
+project name and the root Compose file alone as its starting point. When using
+an existing development override, keep it in the argument list before
+`$keyOverlay`. Confirm that the Moderation service points to its intended local
+database before recreating it.
+
+```powershell
+$stack = @('compose', '-f', 'compose.yaml', '-f', $keyOverlay)
+docker @stack config --quiet
+if ($LASTEXITCODE -ne 0) { throw 'Invalid Compose configuration.' }
+docker @stack up -d --no-deps --build moderation
+if ($LASTEXITCODE -ne 0) { throw 'Moderation did not start.' }
+```
+
+The overlay selects the file through `JWT_PUBLIC_KEY_PATH` and clears any
+inline key inherited from `moderation/.env` because a nonempty
+`JWT_PUBLIC_KEY` takes precedence. For deployments injecting an inline PEM,
+omit these overlay overrides and provide the public PEM as `JWT_PUBLIC_KEY`
+in the deployment environment. The inline setting accepts PEM line breaks or
+literal `\n` separators. Relative file paths resolve from `/app` in Docker.
+Keep the Auth issuer and audiences unless your trusted deployment specifies
+others. The defaults are `JWT_ISSUER=https://auth.conectanexus.ufps.edu.co` and
+`JWT_AUDIENCES=conecta-nexus-gateway,conecta-nexus-services`. Restart Moderation
+after replacing a key. An absent, invalid or unrelated key prevents JWT
+authentication.
+
+Compare the configured public key with the running Auth service through the
+trusted Compose network. The check uses the effective Django settings and
+prints only a public-key fingerprint. Use the configured Auth service hostname
+if it differs from the root Compose service name `auth`.
+
+```powershell
+$moderationContainer = 'conecta-moderation'
+@'
+import hashlib
+import json
+import os
+from urllib.request import urlopen
+
+import django
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, load_pem_public_key
+from django.conf import settings
+
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+django.setup()
+
+def fingerprint(key):
+    der = key.public_bytes(Encoding.DER, PublicFormat.SubjectPublicKeyInfo)
+    return hashlib.sha256(der).hexdigest()
+
+if settings.JWT_PUBLIC_KEY:
+    local_pem = settings.JWT_PUBLIC_KEY.replace("\\n", "\n").encode()
+else:
+    local_pem = (settings.BASE_DIR / settings.JWT_PUBLIC_KEY_PATH).read_bytes()
+with urlopen("http://auth:8000/api/v1/auth/certs", timeout=5) as response:
+    certificate = json.load(response)
+if (certificate["alg"], certificate["kty"], certificate["use"]) != ("RS256", "RSA", "sig"):
+    raise SystemExit("Unexpected Auth certificate metadata.")
+local = fingerprint(load_pem_public_key(local_pem))
+remote = fingerprint(load_pem_public_key(certificate["public_key"].encode()))
+if local != remote:
+    raise SystemExit("Moderation and Auth public keys differ.")
+print("Matching Auth public key (SPKI SHA-256):", local)
+'@ | docker exec -i $moderationContainer python -
+if ($LASTEXITCODE -ne 0) { throw 'Public-key verification failed.' }
+```
+
+### Run the official pytest selector safely in Docker
+
+This PowerShell procedure runs the official selector inside the existing
+Moderation container. A distinct Compose project supplies a disposable
+PostgreSQL 16 instance on the same Docker network, with no published port or
+persisted data. The random ID names both the Compose service and its container,
+so the disposable database does not register the shared `postgres` hostname.
+Only the test process receives its connection URL and temporary uv environment.
+Run it after the application container is up.
+
+```powershell
+$moderationContainer = 'conecta-moderation'
+$inspect = docker inspect --format '{{json .NetworkSettings.Networks}}' $moderationContainer
+if ($LASTEXITCODE -ne 0) { throw 'Moderation is not running.' }
+$networks = @(($inspect | ConvertFrom-Json).PSObject.Properties.Name)
+if ($networks.Count -ne 1) { throw 'Select the Compose network attached to Moderation.' }
+
+$id = 'moderation-verify-' + [Guid]::NewGuid().ToString('N').Substring(0, 12)
+$verifyFile = Join-Path ([IO.Path]::GetTempPath()) ($id + '.yaml')
+$venv = "/tmp/$id-venv"
+$priorUrl = $env:DATABASE_URL
+$dbPassword = [Guid]::NewGuid().ToString('N')
+$env:MODERATION_VERIFY_DB_CONTAINER = $id
+$env:MODERATION_VERIFY_DB_PASSWORD = $dbPassword
+$env:MODERATION_VERIFY_NETWORK = $networks[0]
+$verifyStack = @('compose', '-p', $id, '-f', $verifyFile)
+$started = $false
+try {
+    $verifyConfig = @'
+services:
+  __MODERATION_VERIFY_SERVICE__:
+    image: postgres:16-alpine
+    container_name: ${MODERATION_VERIFY_DB_CONTAINER}
+    environment:
+      POSTGRES_DB: moderation_verify
+      POSTGRES_PASSWORD: ${MODERATION_VERIFY_DB_PASSWORD}
+    tmpfs: [/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD, pg_isready, -h, '127.0.0.1', -U, postgres, -d, moderation_verify]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+networks:
+  default:
+    external: true
+    name: ${MODERATION_VERIFY_NETWORK}
+'@
+    $verifyConfig.Replace('__MODERATION_VERIFY_SERVICE__', $id) |
+        Set-Content -LiteralPath $verifyFile -Encoding ascii
+    docker @verifyStack up -d --wait --wait-timeout 60
+    if ($LASTEXITCODE -ne 0) { throw 'Disposable PostgreSQL did not become ready.' }
+    $started = $true
+    $dsn = [UriBuilder]::new('postgresql', $id, 5432, 'moderation_verify')
+    $dsn.UserName = 'postgres'
+    $dsn.Password = $dbPassword
+    $env:DATABASE_URL = $dsn.Uri.AbsoluteUri
+    docker exec -e DATABASE_URL -e "UV_PROJECT_ENVIRONMENT=$venv" $moderationContainer uv run pytest -k 'test_audit_log_list'
+    if ($LASTEXITCODE -ne 0) { throw 'Audit log pytest selector failed.' }
+} finally {
+    if ($started) {
+        docker exec $moderationContainer python -c "import shutil, sys; shutil.rmtree(sys.argv[1], ignore_errors=True)" $venv
+    }
+    if (Test-Path -LiteralPath $verifyFile) {
+        docker @verifyStack down
+        Remove-Item -LiteralPath $verifyFile
+    }
+    $env:DATABASE_URL = $priorUrl
+    Remove-Item Env:MODERATION_VERIFY_DB_CONTAINER,Env:MODERATION_VERIFY_DB_PASSWORD,Env:MODERATION_VERIFY_NETWORK -ErrorAction SilentlyContinue
+}
+```
+
+Pytest creates a test database in this disposable instance and runs the
+inherited migrations, including the append-only trigger. The verification
+stack cleanup removes only its own temporary container. The live Moderation
+database and running service environment are separate.

@@ -201,6 +201,14 @@ CSRF_COOKIE_PATH = f"{FORCE_SCRIPT_NAME}/" if FORCE_SCRIPT_NAME else "/"
 SESSION_COOKIE_SECURE = not DEBUG
 CSRF_COOKIE_SECURE = not DEBUG
 
+# Trusted Auth configuration for the REST API. Django Admin uses sessions.
+JWT_PUBLIC_KEY = env("JWT_PUBLIC_KEY", default="")
+JWT_PUBLIC_KEY_PATH = env("JWT_PUBLIC_KEY_PATH", default="certs/jwt_public.pem")
+JWT_ISSUER = env("JWT_ISSUER", default="https://auth.conectanexus.ufps.edu.co")
+JWT_AUDIENCES = env.list(
+    "JWT_AUDIENCES", default=["conecta-nexus-gateway", "conecta-nexus-services"]
+)
+REST_FRAMEWORK = {"URL_FORMAT_OVERRIDE": None}
 
 # Application definition
 
