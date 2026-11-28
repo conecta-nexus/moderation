@@ -25,6 +25,9 @@ COPY . .
 # Final project sync
 RUN uv sync --frozen --no-dev || uv sync --no-dev
 
+RUN chmod +x entrypoint.sh
+
 EXPOSE 8000
 
+ENTRYPOINT ["bash", "/app/entrypoint.sh"]
 CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]
