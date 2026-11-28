@@ -64,3 +64,19 @@ class AuditLogQuerySerializer(serializers.Serializer):
                 {"end_date": "End date must be on or after start date."}
             )
         return attrs
+
+
+class SuspensionRequestSerializer(serializers.Serializer):
+    """Validate administrative suspension justification (>= 15 chars)."""
+
+    justification = serializers.CharField(
+        required=True,
+        allow_blank=False,
+        trim_whitespace=True,
+        min_length=15,
+        error_messages={
+            "required": "Justification is required.",
+            "blank": "Justification must contain at least 15 non-whitespace characters.",
+            "min_length": "Justification must be at least 15 characters long.",
+        },
+    )

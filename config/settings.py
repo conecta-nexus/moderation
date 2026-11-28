@@ -208,6 +208,11 @@ JWT_ISSUER = env("JWT_ISSUER", default="https://auth.conectanexus.ufps.edu.co")
 JWT_AUDIENCES = env.list(
     "JWT_AUDIENCES", default=["conecta-nexus-gateway", "conecta-nexus-services"]
 )
+CHALLENGE_SERVICE_URL = env(
+    "CHALLENGE_SERVICE_URL", default="http://challenge:8000"
+).rstrip("/")
+AUTH_SERVICE_URL = env("AUTH_SERVICE_URL", default="http://auth:8000").rstrip("/")
+SERVICE_TIMEOUT_SECONDS = env.float("SERVICE_TIMEOUT_SECONDS", default=5.0)
 REST_FRAMEWORK = {"URL_FORMAT_OVERRIDE": None}
 
 # Application definition
